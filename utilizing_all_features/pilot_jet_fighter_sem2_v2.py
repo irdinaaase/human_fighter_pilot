@@ -31,6 +31,12 @@ for col in continuous_columns:
     mean_value = data[col].mean()
     data[col].fillna(mean_value, inplace=True)
 
+# Feature Engineering: Creating new features
+data["fatigue_stress_index"] = data["fatigue_level"] * data["stress_level"]
+data["cognitive_experience_score"] = data["cognitive_level"] * data["experience_level"]
+data["adaptability_score"] = data["experience_level"] / (data["environmental_stressors"] + data["mission_complexity"] + 1)
+data["normalized_reaction_time"] = data["time_reaction"] / data["time_reaction"].max()
+
 # Encode the target variable if it's categorical
 if data['final_performance'].dtype == 'object':
     label_encoder = LabelEncoder()
@@ -94,7 +100,7 @@ for train_index, test_index in kf.split(X_scaled):
     }
     
     # Perform GridSearchCV
-    xgb_grid_search = GridSearchCV(estimator=xgb_model, param_grid=param_grid, cv=3, scoring='accuracy',  verbose=3, n_jobs=-1)
+    xgb_grid_search = GridSearchCV(estimator=xgb_model, param_grid=param_grid, cv=3, scoring='accuracy', verbose=3, n_jobs=-1)
     xgb_grid_search.fit(X_train_smote, y_train_smote)
 
     # Print the best parameters and model
