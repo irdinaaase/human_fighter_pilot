@@ -17,7 +17,7 @@ from imblearn.over_sampling import SMOTE
 from collections import Counter
 
 # Load the dataset
-file_path = 'STTHK3013_pilot_performance_simulation_data.xlsx'
+file_path = r"C:\Users\Irdina Balqis\Documents\GitHub\human_fighter_pilot\dataset\STTHK3013_pilot_performance_simulation_data.xlsx"
 data = pd.read_excel(file_path, sheet_name='Sheet1')
 print(f"\nData shape: {data.shape}")
 
