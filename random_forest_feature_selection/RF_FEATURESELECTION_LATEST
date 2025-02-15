@@ -1,0 +1,146 @@
+import pandas as pd
+import numpy as np
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from imblearn.over_sampling import SMOTE
+from sklearn.model_selection import KFold, GridSearchCV
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.regularizers import l2
+from collections import Counter
+import os
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+from tqdm import tqdm
+
+# Load and preprocess data
+print("Loading and preprocessing data...")
+file_path = 'STTHK3013_pilot_performance_simulation_data.xlsx'
+data = pd.read_excel(file_path, sheet_name='Sheet1')
+
+# Handle missing values
+imputer = SimpleImputer(strategy='mean')
+data.iloc[:, 1:] = imputer.fit_transform(data.iloc[:, 1:])
+
+data.dropna(subset=['final_performance'], inplace=True)
+
+# Convert target to categorical labels
+data['final_performance'] = pd.qcut(data['final_performance'], q=3, labels=[0, 1, 2]).astype(int)
+
+# Feature engineering
+print("Performing feature engineering...")
+data['stress_x_cognitive'] = data['stress_level'] * data['cognitive_level']
+data['fatigue_x_stress'] = data['fatigue_level'] * data['stress_level']
+data['experience_x_complexity'] = data['experience_level'] * data['mission_complexity']
+data['overall_performance_index'] = (data['cognitive_level'] * data['experience_level']) / (data['fatigue_level'] + data['stress_level'] + 1)
+
+# Prepare features and target
+X = data.drop(columns=['final_performance'])
+y = data['final_performance']
+
+# Ensure no missing values before SMOTE
+if X.isnull().values.any():
+    print("Missing values detected in X. Imputing again...")
+    X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
+
+# Scale features
+scaler = StandardScaler()
+X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
+
+# Ensure no NaN values before applying SMOTE
+X_scaled.fillna(0, inplace=True)
+
+# Apply SMOTE (20% increase)
+print("\nApplying SMOTE with better balancing...")
+sampling_strategy = {cls: int(1.2 * count) for cls, count in Counter(y).items() if count > 1}
+smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
+X_resampled, y_resampled = smote.fit_resample(X_scaled, y)
+
+print("Class distribution after SMOTE:", Counter(y_resampled))
+
+# Feature selection using Random Forest
+print("\nPerforming feature selection...")
+rf_selector = RandomForestClassifier(n_estimators=500, random_state=42)
+rf_selector.fit(X_resampled, y_resampled)
+selected_features = X_resampled.columns[np.argsort(rf_selector.feature_importances_)[-10:]].tolist()
+X_selected = X_resampled[selected_features]
+
+# Model definitions and hyperparameter grids
+models = {
+    'Logistic Regression': LogisticRegression(random_state=42, max_iter=500),
+    'XGBoost': XGBClassifier(random_state=42, eval_metric='mlogloss'),
+}
+
+param_grids = {
+    'Logistic Regression': {
+        'C': [0.01, 0.1, 1, 10],
+        'penalty': ['l2'],
+        'solver': ['lbfgs'],
+        'class_weight': ['balanced', None]
+    },
+    'XGBoost': {
+        'n_estimators': [200, 300],
+        'max_depth': [4, 5, 6],
+        'learning_rate': [0.05, 0.1],
+        'subsample': [0.8, 0.9]
+    }
+}
+
+# Train and evaluate models
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+results = {}
+best_models = {}
+
+for name, model in models.items():
+    print(f"\nTuning {name}...")
+    grid_search = GridSearchCV(model, param_grids[name], cv=3, scoring='accuracy', n_jobs=-1)
+    grid_search.fit(X_selected, y_resampled)
+    best_models[name] = grid_search.best_estimator_
+    
+    accuracy_scores = []
+    for train_idx, val_idx in kf.split(X_selected):
+        X_train, X_val = X_selected.iloc[train_idx], X_selected.iloc[val_idx]
+        y_train, y_val = y_resampled.iloc[train_idx], y_resampled.iloc[val_idx]
+        
+        model = grid_search.best_estimator_
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_val)
+        
+        accuracy_scores.append(accuracy_score(y_val, y_pred))
+    
+    results[name] = np.mean(accuracy_scores)
+
+# Deep Neural Network (DNN) Model
+def create_dnn_model(input_dim):
+    model = Sequential([
+        Dense(128, activation='relu', kernel_regularizer=l2(0.01), input_shape=(input_dim,)),
+        BatchNormalization(),
+        Dropout(0.3),
+        Dense(64, activation='relu', kernel_regularizer=l2(0.01)),
+        BatchNormalization(),
+        Dropout(0.3),
+        Dense(3, activation='softmax')
+    ])
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+print("\nTraining Deep Neural Network (DNN)...")
+dnn_model = create_dnn_model(X_selected.shape[1])
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5)
+dnn_model.fit(X_selected, y_resampled, validation_split=0.2, epochs=100, batch_size=32, callbacks=[early_stopping, reduce_lr], verbose=1)
+_, dnn_accuracy = dnn_model.evaluate(X_selected, y_resampled)
+results['DNN'] = dnn_accuracy
+
+# Print final results
+print("\nFinal Results Summary:")
+for model_name, acc in results.items():
+    print(f"{model_name}: {acc:.4f}")
+
+# Identify best model
+best_model = max(results, key=results.get)
+print(f"\nBest performing model: {best_model} with accuracy {results[best_model]:.4f}")
