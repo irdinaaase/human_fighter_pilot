@@ -2,27 +2,34 @@ import pandas as pd
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog, ttk
-from sklearn.preprocessing import StandardScaler
-from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import RobustScaler
+from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, roc_auc_score
 import joblib
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-# Load trained MLP model and scaler
-mlp_model = joblib.load("mlp_best_model.pkl")  # Load trained model
+# Load trained XGBoost model and scaler
+xgb_model = joblib.load("xgb_best_model.pkl")  # Load trained model
 scaler = joblib.load("scaler.pkl")  # Load trained scaler
 
 # Define selected features
-selected_features = ['time_reaction', 'fatigue_level', 'heart_rate', 'mission_complexity', 'environmental_stressors', 'cognitive_level']
+selected_features = ['mission_complexity', 'cognitive_level', 'stress_level', 'time_reaction', 
+                     'reaction_stress_interaction', 'fatigue_mission_ratio', 'heart_rate_squared']
 
 # Function to process and predict live-stream dataset
 def process_live_data(file_path):
     df_live = pd.read_excel(file_path)
     df_live.fillna(df_live.median(), inplace=True)  # Handle missing values
+    
+    # Apply feature engineering to match training dataset
+    df_live['reaction_stress_interaction'] = df_live['time_reaction'] * df_live['environmental_stressors']
+    df_live['fatigue_mission_ratio'] = df_live['fatigue_level'] / (df_live['mission_complexity'] + 1)
+    df_live['heart_rate_squared'] = df_live['heart_rate'] ** 2
+    
     df_live = df_live[selected_features]  # Select relevant features
     df_scaled = scaler.transform(df_live)  # Scale data
-    predictions = mlp_model.predict(df_scaled)  # Predict performance
+    predictions = xgb_model.predict(df_scaled)  # Predict performance
     
     # Convert predictions from 0-5 to the new categories
     def map_performance(value):
@@ -44,6 +51,8 @@ def process_live_data(file_path):
 def display_results(df_live):
     # Clear previous results
     result_text.delete(1.0, tk.END)
+    
+    # Display results as a table
     result_text.insert(tk.END, df_live.to_string(index=False, justify='center'))
     
     # Display class distribution
@@ -80,7 +89,7 @@ upload_button.pack(pady=10)
 result_frame = tk.Frame(frame, bg="#ffffff")
 result_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
 
-result_text = tk.Text(result_frame, wrap=tk.WORD, height=15, width=100, font=("Courier", 11), bg="#f8f9fa", fg="#333", padx=10, pady=10, relief=tk.SUNKEN)
+result_text = tk.Text(result_frame, wrap=tk.NONE, height=15, width=100, font=("Courier", 11), bg="#f8f9fa", fg="#333", padx=10, pady=10, relief=tk.SUNKEN)
 result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
 scrollbar = tk.Scrollbar(result_frame, command=result_text.yview)
