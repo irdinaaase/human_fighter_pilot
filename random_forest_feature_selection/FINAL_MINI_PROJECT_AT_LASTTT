@@ -4,14 +4,19 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
 from collections import Counter
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
+from sklearn.preprocessing import RobustScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
 from xgboost import XGBClassifier
+from sklearn.feature_selection import RFECV
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from imblearn.over_sampling import SMOTE
+
+# Set global random state for reproducibility
+RANDOM_STATE = 42
+np.random.seed(RANDOM_STATE)
 
 # Load dataset
 file_path = "STTHK3013_pilot_performance_simulation_data.xlsx"
@@ -19,6 +24,11 @@ df = pd.read_excel(file_path, sheet_name='Sheet1')
 
 # Handle missing values using median imputation
 df.fillna(df.median(), inplace=True)
+
+# Feature Engineering: Add Interaction and Polynomial Features
+df['reaction_stress_interaction'] = df['time_reaction'] * df['environmental_stressors']
+df['fatigue_mission_ratio'] = df['fatigue_level'] / (df['mission_complexity'] + 1)
+df['heart_rate_squared'] = df['heart_rate'] ** 2
 
 # Reclassify 'final_performance' into three categories
 def classify_performance(value):
@@ -31,7 +41,7 @@ def classify_performance(value):
 
 df['final_performance'] = df['final_performance'].apply(classify_performance)
 
-# Feature Selection - Keeping all features (even if not used)
+# Feature Selection using Recursive Feature Elimination (RFE)
 X = df.drop(columns=['final_performance'])
 y = df['final_performance']
 
@@ -40,41 +50,38 @@ z_scores = np.abs(stats.zscore(X))
 X_filtered = X[(z_scores < 3).all(axis=1)]
 y_filtered = y[X_filtered.index]
 
-# Step 2: Feature Selection using Random Forest
-rf = RandomForestClassifier(n_estimators=200, random_state=42)
-rf.fit(X_filtered, y_filtered)
-
-# Get feature importances
-feature_importances = pd.Series(rf.feature_importances_, index=X_filtered.columns).sort_values(ascending=False)
-
-# Select top features (keeping the top 6)
-selected_features = feature_importances.head(6).index.tolist()
+# Step 2: Feature Selection using RFE + Cross-Validation
+rf = RandomForestClassifier(n_estimators=300, random_state=RANDOM_STATE)
+rfecv = RFECV(estimator=rf, step=1, cv=5, scoring='accuracy')
+rfecv.fit(X_filtered, y_filtered)
+selected_features = X_filtered.columns[rfecv.support_].tolist()
 print("Selected Features: ", selected_features)
 
-# Step 3: Apply SMOTE (only 20% oversampling)
-smote_ratio = 'auto'  # 20% more data
-smote = SMOTE(sampling_strategy=smote_ratio, random_state=42)
+# Step 3: Apply SMOTE (20% Oversampling for Each Class)
+class_distribution = Counter(y_filtered)
+sampling_strategy = {cls: max(int(count * 1.2), count + 1) for cls, count in class_distribution.items()}
+smote = SMOTE(sampling_strategy=sampling_strategy, random_state=RANDOM_STATE)
 X_resampled, y_resampled = smote.fit_resample(X_filtered[selected_features], y_filtered)
 
 # Print class distributions before and after SMOTE
 original_distribution = Counter(y_filtered)
 new_distribution = Counter(y_resampled)
 print("Original Class Distribution:", original_distribution)
-print("New Class Distribution after 20% SMOTE:", new_distribution)
+print("New Class Distribution after SMOTE:", new_distribution)
 
 # Define models
 models = {
-    "Random Forest": RandomForestClassifier(random_state=42),
-    "Logistic Regression": LogisticRegression(max_iter=1000),
-    "Deep Neural Network (MLP)": MLPClassifier(hidden_layer_sizes=(64, 32), activation='relu', max_iter=500),
-    "XGBoost": XGBClassifier(use_label_encoder=False, eval_metric='mlogloss')
+    "Random Forest": RandomForestClassifier(random_state=RANDOM_STATE),
+    "Logistic Regression": LogisticRegression(max_iter=2000, random_state=RANDOM_STATE),
+    "Deep Neural Network (MLP)": MLPClassifier(hidden_layer_sizes=(256, 128, 64), activation='relu', alpha=0.0001, max_iter=1000, random_state=RANDOM_STATE),
+    "XGBoost": XGBClassifier(eval_metric='mlogloss', random_state=RANDOM_STATE)
 }
 
-# Step 4: Train and Optimize Models
+# Step 4: Train and Optimize Models with Stratified K-Fold CV
 param_grids = {
     "Random Forest": {
-        'n_estimators': [200, 300, 400],
-        'max_depth': [10, 20, 30, None],
+        'n_estimators': [300, 400, 500],
+        'max_depth': [20, 30, 40, None],
         'min_samples_split': [2, 5, 10]
     },
     "Logistic Regression": {
@@ -82,31 +89,33 @@ param_grids = {
         'solver': ['lbfgs', 'liblinear']
     },
     "Deep Neural Network (MLP)": {
-        'hidden_layer_sizes': [(64, 32), (128, 64), (256, 128)],
+        'hidden_layer_sizes': [(256, 128, 64), (512, 256, 128)],
         'activation': ['relu', 'tanh'],
-        'learning_rate_init': [0.001, 0.01]
+        'learning_rate_init': [0.001, 0.005]
     },
     "XGBoost": {
-        'n_estimators': [200, 300, 400],
-        'max_depth': [3, 6, 9],
-        'learning_rate': [0.01, 0.1, 0.2]
+        'n_estimators': [300, 400, 500],
+        'max_depth': [6, 9, 12],
+        'learning_rate': [0.01, 0.05, 0.1]
     }
 }
 
 best_models = {}
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+
 for name, param_grid in param_grids.items():
     print(f"Optimizing {name}...")
-    grid_search = GridSearchCV(models[name], param_grid, cv=3, scoring='accuracy', n_jobs=-1)
+    grid_search = GridSearchCV(models[name], param_grid, cv=skf, scoring='accuracy', n_jobs=-1)
     grid_search.fit(X_resampled, y_resampled)
     
     best_models[name] = grid_search.best_estimator_
     print(f"Best Params for {name}: {grid_search.best_params_}")
 
 # Split dataset for final testing
-X_train, X_test, y_train, y_test = train_test_split(X_resampled, y_resampled, test_size=0.2, random_state=42, stratify=y_resampled)
+X_train, X_test, y_train, y_test = train_test_split(X_resampled, y_resampled, test_size=0.2, random_state=RANDOM_STATE, stratify=y_resampled)
 
-# Standardize features
-scaler = StandardScaler()
+# Standardize features using RobustScaler
+scaler = RobustScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
 
@@ -121,7 +130,7 @@ for name, model in best_models.items():
     
     final_results[name] = {"accuracy": accuracy, "report": report, "confusion_matrix": conf_matrix}
 
-    # Display results like in the uploaded image
+    # Display results
     print(f"===== {name} =====")
     print("Accuracy:", accuracy)
     print("\nClassification Report:\n", report)
