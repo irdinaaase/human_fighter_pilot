@@ -7,18 +7,22 @@ import sklearn
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.impute import KNNImputer
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
-from scipy.stats.mstats import winsorize
-from tensorflow.keras.utils import to_categorical
-from xgboost.sklearn import XGBClassifier
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from xgboost import XGBClassifier
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import ReduceLROnPlateau, EarlyStopping
+from tensorflow.keras.utils import to_categorical
 from imblearn.over_sampling import SMOTE
+from collections import Counter
+
+# Print library versions
+print(f"TensorFlow version: {tf.__version__}")
+print(f"Keras version: {keras.__version__}")
+print(f"xgboost version: {xgboost.__version__}")
+print(f"sklearn version: {sklearn.__version__}")
 
 # ---------------------------- Load Data ----------------------------
 file_path = r"C:\Users\Irdina Balqis\Documents\GitHub\human_fighter_pilot\dataset\STTHK3013_pilot_performance_simulation_data.xlsx"
@@ -28,107 +32,132 @@ print(f"\nData shape: {data.shape}")
 # Handle missing values in the target column
 data.dropna(subset=['final_performance'], inplace=True)
 
-# ---------------------------- Class Consolidation ----------------------------
+# ---------------------------- Should Update: Class Consolidation ----------------------------
 def categorize_performance(value):
+    """Convert numerical performance scores into categories."""
     if value <= 1:
         return 0  # Low
     elif 2 <= value <= 3:
         return 1  # Medium
-    else:
+    elif 4 <= value <= 5:
         return 2  # High
 
+# Apply class consolidation
 data['performance_category'] = data['final_performance'].apply(categorize_performance)
 
+# Check updated distribution
+print("Updated Class Distribution:", data['performance_category'].value_counts())
+
 # ---------------------------- Data Preprocessing ----------------------------
+
+# Columns that require KNN imputation
 continuous_columns = [
     'heart_rate', 'sleep_quality', 'mission_complexity', 'experience_level',
     'environmental_stressors', 'cognitive_level', 'fatigue_level', 'stress_level', 'time_reaction'
 ]
-
-# Apply KNN Imputer
 knn_imputer = KNNImputer(n_neighbors=5)
 data[continuous_columns] = knn_imputer.fit_transform(data[continuous_columns])
 
-# Handle Outliers
-def remove_outliers_iqr(df, cols):
-    for col in cols:
-        Q1, Q3 = df[col].quantile([0.25, 0.75])
-        IQR = Q3 - Q1
-        lower, upper = Q1 - 1.5 * IQR, Q3 + 1.5 * IQR
-        df[col] = np.clip(df[col], lower, upper)
-    return df
+# Final check for remaining NaN values
+if data.isnull().values.any():
+    print("\nWarning: NaN values detected after initial processing. Imputing again...")
+    data.fillna(data.mean(), inplace=True)
 
-outlier_cols = ['heart_rate', 'sleep_quality', 'experience_level', 'cognitive_level', 'stress_level', 'time_reaction']
-data = remove_outliers_iqr(data, outlier_cols)
-data[outlier_cols] = data[outlier_cols].apply(lambda col: winsorize(col, limits=(0.05, 0.05)))
+# ---------------------------- Feature Engineering ----------------------------
+data["fatigue_stress_index"] = data["fatigue_level"] * data["stress_level"]
+data["cognitive_experience_score"] = data["cognitive_level"] * data["experience_level"]
+data["adaptability_score"] = data["experience_level"] / (data["environmental_stressors"] + data["mission_complexity"] + 1)
+data["normalized_reaction_time"] = data["time_reaction"] / data["time_reaction"].max()
 
-# Feature Engineering
-data['high_stress_alert'] = ((data['stress_level'] > data['stress_level'].quantile(0.90)) & 
-                           (data['heart_rate'] > data['heart_rate'].quantile(0.90))).astype(int)
+# # Drop redundant features after engineering
+# data.drop(columns=['fatigue_level', 'stress_level', 'cognitive_level', 'experience_level', 
+#                    'environmental_stressors', 'mission_complexity', 'time_reaction', 'final_performance'], inplace=True)
 
-data['low_sleep_risk'] = ((data['sleep_quality'] < data['sleep_quality'].quantile(0.10)) & 
-                        (data['fatigue_level'] > data['fatigue_level'].quantile(0.75))).astype(int)
-
-data['elite_experience'] = ((data['experience_level'] > data['experience_level'].quantile(0.95)) & 
-                          (data['cognitive_level'] > data['cognitive_level'].quantile(0.80))).astype(int)
-
-# Normalization & Standardization
-scaler = MinMaxScaler()
-std_scaler = StandardScaler()
-data['normalized_reaction_time'] = scaler.fit_transform(data[['time_reaction']])
-data['std_cognitive_level'] = std_scaler.fit_transform(data[['cognitive_level']])
-
-# Drop unnecessary features
-drop_cols = ['heart_rate', 'sleep_quality', 'experience_level', 'cognitive_level', 
-             'stress_level', 'time_reaction', 'fatigue_level', 'mission_complexity', 'environmental_stressors']
-data.drop(columns=drop_cols, inplace=True)
-
-# ---------------------------- Train-Test Split ----------------------------
+# Define features
 X = data.drop(columns=['performance_category'])
 y = data['performance_category']
 
-# Split the dataset (80% train, 20% test)
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+# Normalize numerical features
+scaler = StandardScaler()
+numeric_columns = X.select_dtypes(include=['float64', 'int64']).columns
+X[numeric_columns] = scaler.fit_transform(X[numeric_columns])
 
-# Apply SMOTE to balance classes
-smote = SMOTE(random_state=42)
-X_train, y_train = smote.fit_resample(X_train, y_train)
+# Print class distribution before SMOTE
+print("\nOriginal Class Distribution:", Counter(y))
 
-# ---------------------------- Model Training ----------------------------
+# Apply SMOTE to handle class imbalance
+smote = SMOTE(sampling_strategy={0: 358, 1: 352, 2: 327}, random_state=42)
 
-# Logistic Regression
-log_reg_param_grid = {'C': [0.01, 0.1, 1, 10], 'penalty': ['l1', 'l2'], 'solver': ['liblinear', 'saga']}
-log_reg_model = GridSearchCV(LogisticRegression(max_iter=5000), log_reg_param_grid, cv=3, scoring='accuracy')
-log_reg_model.fit(X_train, y_train)
-log_reg_pred = log_reg_model.best_estimator_.predict(X_test)
-log_reg_acc = accuracy_score(y_test, log_reg_pred)
-print(f"\nLogistic Regression Accuracy: {log_reg_acc:.4f}")
+# K-Fold Cross-Validation
+kf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-# XGBoost
-xgb_param_grid = {'learning_rate': [0.01, 0.05, 0.1], 'max_depth': [3, 5, 7], 'n_estimators': [50, 100, 200]}
-xgb_model = GridSearchCV(XGBClassifier(eval_metric='mlogloss'), xgb_param_grid, cv=3, scoring='accuracy', n_jobs=-1)
-xgb_model.fit(X_train, y_train)
-xgb_pred = xgb_model.best_estimator_.predict(X_test)
-xgb_acc = accuracy_score(y_test, xgb_pred)
-print(f"\nXGBoost Accuracy: {xgb_acc:.4f}")
+# Initialize lists to store accuracies
+log_reg_accuracies = []
+xgb_accuracies = []
+dnn_accuracies = []
 
-# DNN Model
-num_classes = len(np.unique(y))
-y_train_encoded = to_categorical(y_train, num_classes)
-y_test_encoded = to_categorical(y_test, num_classes)
+# Parameter grid for Logistic Regression
+log_reg_param_grid = {
+    'C': [0.01, 0.1, 1, 10],
+    'penalty': ['l1', 'l2'],
+    'solver': ['liblinear', 'saga']
+}
 
-dnn_model = Sequential([
-    Dense(128, activation='relu', input_shape=(X_train.shape[1],)),
-    BatchNormalization(),
-    Dropout(0.3),
-    Dense(64, activation='relu'),
-    Dropout(0.3),
-    Dense(num_classes, activation='softmax')
-])
-dnn_model.compile(optimizer=Adam(learning_rate=0.001), loss='categorical_crossentropy', metrics=['accuracy'])
+# Parameter grid for XGBoost
+xgb_param_grid = {
+    'learning_rate': [0.01, 0.05, 0.1],
+    'max_depth': [3, 5, 7],
+    'n_estimators': [50, 100, 200],
+    'subsample': [0.8, 0.9, 1.0]
+}
 
-dnn_model.fit(X_train, y_train_encoded, validation_split=0.2, epochs=30, batch_size=32,
-              callbacks=[ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3), EarlyStopping(patience=5)])
+# Loop through each fold
+for train_index, test_index in kf.split(X, y):
+    X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+    y_train, y_test = y.iloc[train_index], y.iloc[test_index]
 
-dnn_acc = dnn_model.evaluate(X_test, y_test_encoded, verbose=0)[1]
-print(f"\nDNN Accuracy: {dnn_acc:.4f}")
+    # Apply SMOTE only to the training set
+    X_train_smote, y_train_smote = smote.fit_resample(X_train, y_train)
+    print(f"Class Distribution After SMOTE (Train): {Counter(y_train_smote)}")
+
+    # ------------------------ Logistic Regression ------------------------
+    log_reg_model = GridSearchCV(LogisticRegression(max_iter=1000, random_state=42), log_reg_param_grid, cv=3, scoring='accuracy')
+    log_reg_model.fit(X_train_smote, y_train_smote)
+    y_pred_log_reg = log_reg_model.best_estimator_.predict(X_test)
+    log_reg_accuracies.append(accuracy_score(y_test, y_pred_log_reg))
+
+    # ------------------------ XGBoost ------------------------
+    xgb_model = GridSearchCV(XGBClassifier(random_state=42, eval_metric='mlogloss'), xgb_param_grid, cv=3, scoring='accuracy', verbose=1, n_jobs=-1)
+    xgb_model.fit(X_train_smote, y_train_smote)
+    y_pred_xgb = xgb_model.best_estimator_.predict(X_test)
+    xgb_accuracies.append(accuracy_score(y_test, y_pred_xgb))
+
+    # ------------------------ Deep Neural Network (DNN) ------------------------
+    num_classes = len(np.unique(y))
+
+    # Convert labels to categorical format
+    y_train_encoded = to_categorical(y_train_smote, num_classes=num_classes)
+    y_test_encoded = to_categorical(y_test, num_classes=num_classes)
+
+    # Define DNN model
+    dnn_model = Sequential([
+        Dense(128, activation='relu', input_dim=X_train_smote.shape[1]),
+        BatchNormalization(),
+        Dropout(0.3),
+        Dense(64, activation='relu'),
+        Dense(num_classes, activation='softmax')
+    ])
+    dnn_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+    # Train the DNN model
+    dnn_model.fit(X_train_smote, y_train_encoded, validation_split=0.2, epochs=20, batch_size=32, verbose=0)
+
+    # Evaluate DNN model
+    _, dnn_accuracy = dnn_model.evaluate(X_test, y_test_encoded, verbose=0)
+    dnn_accuracies.append(dnn_accuracy)
+
+# Print final model performance
+print("\nModel Performance Summary:")
+print(f"Logistic Regression Average Accuracy: {np.mean(log_reg_accuracies):.4f}")
+print(f"XGBoost Average Accuracy: {np.mean(xgb_accuracies):.4f}")
+print(f"DNN Average Accuracy: {np.mean(dnn_accuracies):.4f}")
