@@ -67,11 +67,11 @@ if data.isnull().values.any():
 data["fatigue_stress_index"] = data["fatigue_level"] * data["stress_level"]
 data["cognitive_experience_score"] = data["cognitive_level"] * data["experience_level"]
 data["adaptability_score"] = data["experience_level"] / (data["environmental_stressors"] + data["mission_complexity"] + 1)
-data["normalized_reaction_time"] = data["time_reaction"] / data["time_reaction"].max()
+data["normalized_reaction_time"] = np.log1p(data["time_reaction"] / data["time_reaction"].max())
 
-# # Drop redundant features after engineering
-# data.drop(columns=['fatigue_level', 'stress_level', 'cognitive_level', 'experience_level', 
-#                    'environmental_stressors', 'mission_complexity', 'time_reaction', 'final_performance'], inplace=True)
+
+# Drop redundant features after engineering
+data.drop(columns=['fatigue_level', 'stress_level', 'cognitive_level', 'experience_level'], inplace=True)
 
 # Define features
 X = data.drop(columns=['performance_category'])
