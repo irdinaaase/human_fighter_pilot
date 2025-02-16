@@ -1,0 +1,132 @@
+import tensorflow as tf
+import keras
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+import sklearn
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.impute import KNNImputer
+from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from xgboost import XGBClassifier
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.regularizers import l2
+from imblearn.over_sampling import SMOTE
+from collections import Counter
+from sklearn.feature_selection import RFECV
+
+# Load Data
+file_path = "STTHK3013_pilot_performance_simulation_data.xlsx"
+data = pd.read_excel(file_path, sheet_name='Sheet1')
+data.dropna(subset=['final_performance'], inplace=True)
+
+# Class Consolidation
+def categorize_performance(value):
+    if value <= 1:
+        return 0  # Low
+    elif 2 <= value <= 3:
+        return 1  # Medium
+    elif 4 <= value <= 5:
+        return 2  # High
+
+data['performance_category'] = data['final_performance'].apply(categorize_performance)
+
+# Define Features & Target
+X = data.drop(columns=['performance_category', 'final_performance'])
+y = data['performance_category']
+
+# Train-Test Split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+
+# Missing Value Imputation
+knn_imputer = KNNImputer(n_neighbors=5)
+X_train = pd.DataFrame(knn_imputer.fit_transform(X_train), columns=X.columns)
+X_test = pd.DataFrame(knn_imputer.transform(X_test), columns=X.columns)
+
+# Feature Selection Using RFECV
+estimator = XGBClassifier(random_state=42, eval_metric='mlogloss')
+rfe_selector = RFECV(estimator, step=1, cv=5, scoring='accuracy', n_jobs=-1)
+rfe_selector.fit(X_train, y_train)
+selected_features = X.columns[rfe_selector.support_]
+
+print("\nSelected Features:", selected_features.tolist())
+
+X_train = X_train[selected_features]
+X_test = X_test[selected_features]
+
+# Feature Engineering
+if "fatigue_level" in X_train.columns and "stress_level" in X_train.columns:
+    X_train["fatigue_stress_index"] = X_train["fatigue_level"] * X_train["stress_level"]
+    X_test["fatigue_stress_index"] = X_test["fatigue_level"] * X_test["stress_level"]
+
+# Normalization
+scaler = StandardScaler()
+X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns)
+X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns)
+
+# Apply SMOTE Only on Train Data
+smote = SMOTE(sampling_strategy={2: 358, 1: 352, 0: 327}, random_state=42)
+X_train_smote, y_train_smote = smote.fit_resample(X_train_scaled, y_train)
+print("\nClass Distribution After SMOTE:", Counter(y_train_smote))
+
+# K-Fold Cross-Validation
+kf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+log_reg_accuracies = []
+xgb_accuracies = []
+dnn_accuracies = []
+
+log_reg_param_grid = {'C': [0.01, 0.1, 1, 10], 'penalty': ['l1', 'l2'], 'solver': ['liblinear', 'saga']}
+xgb_param_grid = {'learning_rate': [0.01, 0.05, 0.1], 'max_depth': [3, 5, 7], 'n_estimators': [50, 100, 200]}
+
+best_models = {}
+
+for train_index, test_index in kf.split(X_train_smote, y_train_smote):
+    X_k_train, X_k_test = X_train_smote.iloc[train_index], X_train_smote.iloc[test_index]
+    y_k_train, y_k_test = y_train_smote.iloc[train_index], y_train_smote.iloc[test_index]
+    
+    # Logistic Regression
+    log_reg_model = GridSearchCV(LogisticRegression(max_iter=1000, random_state=42), log_reg_param_grid, cv=3, scoring='accuracy')
+    log_reg_model.fit(X_k_train, y_k_train)
+    best_models['Logistic Regression'] = log_reg_model.best_estimator_
+    y_pred_log_reg = log_reg_model.best_estimator_.predict(X_k_test)
+    log_reg_accuracies.append(accuracy_score(y_k_test, y_pred_log_reg))
+    
+    # XGBoost
+    xgb_model = GridSearchCV(XGBClassifier(random_state=42, eval_metric='mlogloss'), xgb_param_grid, cv=3, scoring='accuracy')
+    xgb_model.fit(X_k_train, y_k_train)
+    best_models['XGBoost'] = xgb_model.best_estimator_
+    y_pred_xgb = xgb_model.best_estimator_.predict(X_k_test)
+    xgb_accuracies.append(accuracy_score(y_k_test, y_pred_xgb))
+    
+# Train & Compare All Optimized Models
+final_results = {}
+for name, model in best_models.items():
+    model.fit(X_train_scaled, y_train)
+    y_pred = model.predict(X_test_scaled)
+    accuracy = accuracy_score(y_test, y_pred)
+    report = classification_report(y_test, y_pred, digits=2)
+    conf_matrix = confusion_matrix(y_test, y_pred)
+    
+    final_results[name] = {"accuracy": accuracy, "report": report, "confusion_matrix": conf_matrix}
+    
+    print(f"===== {name} =====")
+    print("Accuracy:", accuracy)
+    print("\nClassification Report:\n", report)
+    print("\nConfusion Matrix:\n", conf_matrix, "\n")
+
+# Print Final Results
+print("\nModel Performance Summary:")
+print(f"Logistic Regression Average Accuracy: {np.mean(log_reg_accuracies):.4f}")
+print(f"XGBoost Average Accuracy: {np.mean(xgb_accuracies):.4f}")
+
+# Identify the Best Performing Model
+best_model_name = max(final_results, key=lambda x: final_results[x]['accuracy'])
+best_model_params = best_models[best_model_name].get_params()
+
+print(f"\nBest Model: {best_model_name} with Accuracy: {final_results[best_model_name]['accuracy']:.4f}")
+print(f"Best Model Parameters: {best_model_params}")
