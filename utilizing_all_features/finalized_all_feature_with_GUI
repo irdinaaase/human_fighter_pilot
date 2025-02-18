@@ -1,0 +1,144 @@
+import pandas as pd
+import numpy as np
+import tkinter as tk
+from tkinter import filedialog, ttk
+from sklearn.preprocessing import RobustScaler
+from sklearn.impute import KNNImputer
+from xgboost import XGBClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, roc_auc_score
+import joblib
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Load trained XGBoost model and scaler
+model_path = r"C:\Users\Irdina Balqis\Documents\GitHub\human_fighter_pilot\utilizing_all_features\xgb_best_model.pkl"
+scaler_path = r"C:\Users\Irdina Balqis\Documents\GitHub\human_fighter_pilot\utilizing_all_features\scaler.pkl"
+
+xgb_model = joblib.load(model_path)
+scaler = joblib.load(scaler_path)
+
+# Define selected features
+selected_features = ['heart_rate', 'sleep_quality', 'mission_complexity', 'experience_level', 
+                     'environmental_stressors', 'cognitive_level', 'fatigue_level', 'stress_level', 
+                     'time_reaction', 'fatigue_stress_index', 'cognitive_experience_score', 'adaptability_score',
+                     'normalized_reaction_time']
+
+# Function to process and predict live-stream dataset
+def process_live_data(file_path):
+    df_live = pd.read_excel(file_path)
+
+    print("Original DataFrame Columns:", df_live.columns.tolist())  # Debugging
+
+    # Ensure required features exist
+    required_cols = ['heart_rate', 'sleep_quality', 'mission_complexity', 'experience_level', 
+                     'environmental_stressors', 'cognitive_level', 'fatigue_level', 'stress_level', 
+                     'time_reaction']
+
+    for col in required_cols:
+        if col not in df_live.columns:
+            raise KeyError(f"Missing column: {col} in the uploaded file")
+
+    # Fill missing columns with NaN if any are missing
+    for col in required_cols:
+        if col not in df_live.columns:
+            df_live[col] = np.nan
+
+    # Apply KNN Imputer
+    knn_imputer = KNNImputer(n_neighbors=5)
+    df_imputed = knn_imputer.fit_transform(df_live[required_cols])  # Only impute required columns
+    
+    # Convert back to DataFrame
+    df_live = pd.DataFrame(df_imputed, columns=required_cols)
+
+    # Feature Engineering
+    df_live["fatigue_stress_index"] = df_live["fatigue_level"] * df_live["stress_level"]
+    df_live["cognitive_experience_score"] = df_live["cognitive_level"] * df_live["experience_level"]
+    df_live["adaptability_score"] = df_live["experience_level"] / (df_live["environmental_stressors"] + df_live["mission_complexity"] + 1)
+    df_live["normalized_reaction_time"] = np.log1p(df_live["time_reaction"] / df_live["time_reaction"].max())
+
+    # Ensure df_live has the right columns before scaling
+    print("Final Features Before Scaling:", df_live.columns.tolist())  # Debugging
+
+    try:
+        df_scaled = scaler.transform(df_live[selected_features])  # Scale data
+        predictions = xgb_model.predict(df_scaled)  # Predict performance
+    except Exception as e:
+        print("Error during model prediction:", e)
+        raise
+
+    # Ensure predictions exist
+    print("Predictions:", predictions)  # Debugging
+
+    # Map predictions to categories
+    def map_performance(value):
+        if value == 0:
+            return 0  # Basic
+        elif value == 1:
+            return 1  # Skilled
+        elif value == 2:
+            return 2  # Expert
+        else:
+            return np.nan  # Handle unexpected values
+
+    df_live['Predicted Performance'] = [map_performance(pred) for pred in predictions]
+
+    # Ensure this column is created
+    df_live['Performance Label'] = df_live['Predicted Performance'].map({0: 'Basic', 1: 'Skilled', 2: 'Expert'})
+    
+    print(df_live['Performance Label'].value_counts())
+
+    print("Final DataFrame Columns:", df_live.columns.tolist())  # Debugging
+
+    return df_live
+
+# Function to display results
+def display_results(df_live):
+    # Clear previous results
+    result_text.delete(1.0, tk.END)
+    
+    # Display results as a table
+    result_text.insert(tk.END, df_live.to_string(index=False, justify='center'))
+    
+    # Display class distribution
+    plt.figure(figsize=(8, 5))
+    sns.countplot(x=df_live['Performance Label'], palette="coolwarm")
+    plt.title("Predicted Pilot Performance Distribution", fontsize=14)
+    plt.xlabel("Performance Category", fontsize=12)
+    plt.ylabel("Count", fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.show()
+
+# GUI Function
+def open_file():
+    file_path = filedialog.askopenfilename(title="Select Live Data File", filetypes=[("Excel Files", "*.xlsx")])
+    if file_path:
+        df_live = process_live_data(file_path)
+        display_results(df_live)
+
+# GUI Setup
+root = tk.Tk()
+root.title("Pilot Performance Live Analysis")
+root.geometry("1000x600")
+root.configure(bg="#f8f9fa")
+
+frame = tk.Frame(root, bg="#ffffff", padx=20, pady=20, relief=tk.RIDGE, borderwidth=2)
+frame.pack(pady=20, padx=20, fill=tk.BOTH, expand=True)
+
+label = tk.Label(frame, text="Upload Live Data for Pilot Performance Analysis", font=("Arial", 18, "bold"), bg="#ffffff")
+label.pack(pady=10)
+
+upload_button = tk.Button(frame, text="Upload Live Data", command=open_file, font=("Arial", 14, "bold"), bg="#007BFF", fg="white", padx=20, pady=10, relief=tk.RAISED)
+upload_button.pack(pady=10)
+
+result_frame = tk.Frame(frame, bg="#ffffff")
+result_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+
+result_text = tk.Text(result_frame, wrap=tk.NONE, height=15, width=100, font=("Courier", 11), bg="#f8f9fa", fg="#333", padx=10, pady=10, relief=tk.SUNKEN)
+result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+scrollbar = tk.Scrollbar(result_frame, command=result_text.yview)
+result_text.config(yscrollcommand=scrollbar.set)
+scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+# Run GUI
+root.mainloop()

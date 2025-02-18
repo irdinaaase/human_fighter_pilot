@@ -1,5 +1,6 @@
 # -------------------- LIBRARIES --------------------
 import tensorflow as tf
+import joblib
 import keras
 import pandas as pd
 import numpy as np
@@ -65,15 +66,19 @@ X_test["cognitive_experience_score"] = X_test["cognitive_level"] * X_test["exper
 X_test["adaptability_score"] = X_test["experience_level"] / (X_test["environmental_stressors"] + X_test["mission_complexity"] + 1)
 X_test["normalized_reaction_time"] = np.log1p(X_test["time_reaction"] / X_test["time_reaction"].max())
 
-# Drop redundant features
-drop_cols = ['fatigue_level', 'stress_level', 'cognitive_level', 'experience_level']
-X_train.drop(columns=drop_cols, inplace=True)
-X_test.drop(columns=drop_cols, inplace=True)
+# # Drop redundant features
+# drop_cols = ['fatigue_level', 'stress_level', 'cognitive_level', 'experience_level', 'environmental_stressors', 'time_reaction', 'mission_complexity']
+# X_train.drop(columns=drop_cols, inplace=True)
+# X_test.drop(columns=drop_cols, inplace=True)
 
 # -------------------- NORMALIZATION --------------------
 scaler = StandardScaler()
 X_train[X_train.select_dtypes(include=['float64', 'int64']).columns] = scaler.fit_transform(X_train)
 X_test[X_test.select_dtypes(include=['float64', 'int64']).columns] = scaler.transform(X_test)
+
+# Save scaler for GUI usage
+joblib.dump(scaler, "scaler.pkl")
+print("✅  saved as scaler.pkl")
 
 # -------------------- APPLY SMOTE ONLY ON TRAIN DATA --------------------
 smote = SMOTE(sampling_strategy={2: 358, 1: 352, 0: 327}, random_state=42)
@@ -131,5 +136,14 @@ for train_index, test_index in kf.split(X_train_smote, y_train_smote):
 # -------------------- PRINT FINAL RESULTS --------------------
 print("\nModel Performance Summary:")
 print(f"Logistic Regression Average Accuracy: {np.mean(log_reg_accuracies):.4f}")
+
 print(f"XGBoost Average Accuracy: {np.mean(xgb_accuracies):.4f}")
+
+# Get the best model from GridSearchCV
+best_xgb_model = xgb_model.best_estimator_
+
+# Save the model
+joblib.dump(best_xgb_model, "xgb_best_model.pkl")
+print("✅ XGBoost model saved as xgb_best_model.pkl")
+
 print(f"DNN Average Accuracy: {np.mean(dnn_accuracies):.4f}")
