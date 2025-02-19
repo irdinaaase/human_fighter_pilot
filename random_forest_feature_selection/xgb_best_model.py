@@ -4,7 +4,8 @@ from sklearn.preprocessing import RobustScaler
 from xgboost import XGBClassifier
 
 # Load the dataset (same one used for training)
-file_path = "STTHK3013_pilot_performance_simulation_data.xlsx"
+# file_path = "STTHK3013_pilot_performance_simulation_data.xlsx"
+file_path = r"C:\Users\Irdina Balqis\Documents\GitHub\human_fighter_pilot\dataset\STTHK3013_pilot_performance_simulation_data.xlsx"
 df = pd.read_excel(file_path, sheet_name='Sheet1')
 
 # Feature Engineering: Add Interaction and Polynomial Features
