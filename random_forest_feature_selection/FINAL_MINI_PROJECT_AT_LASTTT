@@ -8,15 +8,19 @@ from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearc
 from sklearn.preprocessing import RobustScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.neural_network import MLPClassifier
 from xgboost import XGBClassifier
 from sklearn.feature_selection import RFECV
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from imblearn.over_sampling import SMOTE
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.optimizers import Adam
 
 # Set global random state for reproducibility
 RANDOM_STATE = 42
 np.random.seed(RANDOM_STATE)
+tf.random.set_seed(RANDOM_STATE)
 
 # Load dataset
 file_path = "STTHK3013_pilot_performance_simulation_data.xlsx"
@@ -57,6 +61,22 @@ rfecv.fit(X_filtered, y_filtered)
 selected_features = X_filtered.columns[rfecv.support_].tolist()
 print("Selected Features: ", selected_features)
 
+# Train the model on the selected features
+rf.fit(X_filtered[selected_features], y_filtered)
+
+# Create a DataFrame for Feature Importances
+importance_df = pd.DataFrame({
+    'Feature (Random Forest)': selected_features,
+    'Importance': rf.feature_importances_
+})
+
+# Sort by importance
+importance_df = importance_df.sort_values(by='Importance', ascending=False)
+
+# Print the table in a clean format
+print("\nFeature Importance from Random Forest:\n")
+print(importance_df.to_string(index=False))
+
 # Step 3: Apply SMOTE (20% Oversampling for Each Class)
 class_distribution = Counter(y_filtered)
 sampling_strategy = {cls: max(int(count * 1.2), count + 1) for cls, count in class_distribution.items()}
@@ -73,9 +93,23 @@ print("New Class Distribution after SMOTE:", new_distribution)
 models = {
     "Random Forest": RandomForestClassifier(random_state=RANDOM_STATE),
     "Logistic Regression": LogisticRegression(max_iter=2000, random_state=RANDOM_STATE),
-    "Deep Neural Network (MLP)": MLPClassifier(hidden_layer_sizes=(256, 128, 64), activation='relu', alpha=0.0001, max_iter=1000, random_state=RANDOM_STATE),
     "XGBoost": XGBClassifier(eval_metric='mlogloss', random_state=RANDOM_STATE)
 }
+
+# Define the Deep Neural Network (DNN) model
+def create_dnn_model(input_dim, learning_rate=0.001):
+    model = Sequential([
+        Dense(256, activation='relu', input_shape=(input_dim,)),
+        Dropout(0.3),
+        Dense(128, activation='relu'),
+        Dropout(0.3),
+        Dense(64, activation='relu'),
+        Dense(3, activation='softmax')  # 3 classes for classification
+    ])
+    model.compile(optimizer=Adam(learning_rate=learning_rate),
+                  loss='sparse_categorical_crossentropy',
+                  metrics=['accuracy'])
+    return model
 
 # Step 4: Train and Optimize Models with Stratified K-Fold CV
 param_grids = {
@@ -88,11 +122,6 @@ param_grids = {
         'C': [0.1, 1, 10],
         'solver': ['lbfgs', 'liblinear']
     },
-    "Deep Neural Network (MLP)": {
-        'hidden_layer_sizes': [(256, 128, 64), (512, 256, 128)],
-        'activation': ['relu', 'tanh'],
-        'learning_rate_init': [0.001, 0.005]
-    },
     "XGBoost": {
         'n_estimators': [300, 400, 500],
         'max_depth': [6, 9, 12],
@@ -101,6 +130,7 @@ param_grids = {
 }
 
 best_models = {}
+best_params = {}
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
 
 for name, param_grid in param_grids.items():
@@ -109,6 +139,7 @@ for name, param_grid in param_grids.items():
     grid_search.fit(X_resampled, y_resampled)
     
     best_models[name] = grid_search.best_estimator_
+    best_params[name] = grid_search.best_params_
     print(f"Best Params for {name}: {grid_search.best_params_}")
 
 # Split dataset for final testing
@@ -118,6 +149,19 @@ X_train, X_test, y_train, y_test = train_test_split(X_resampled, y_resampled, te
 scaler = RobustScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
+
+# Train Deep Neural Network
+input_dim = X_train_scaled.shape[1]
+dnn_model = create_dnn_model(input_dim)
+
+history = dnn_model.fit(X_train_scaled, y_train, epochs=50, batch_size=32, validation_split=0.1, verbose=1)
+
+# Evaluate DNN Model
+dnn_loss, dnn_accuracy = dnn_model.evaluate(X_test_scaled, y_test, verbose=0)
+print(f"DNN Model Accuracy: {dnn_accuracy:.4f}")
+
+# Save DNN Best Parameters
+best_params["Deep Neural Network"] = {"learning_rate": 0.001, "epochs": 50, "batch_size": 32}
 
 # Step 5: Train & Compare All Optimized Models
 final_results = {}
@@ -136,9 +180,40 @@ for name, model in best_models.items():
     print("\nClassification Report:\n", report)
     print("\nConfusion Matrix:\n", conf_matrix, "\n")
 
+# Add DNN Model Results
+final_results["Deep Neural Network"] = {"accuracy": dnn_accuracy}
+
+# Predict DNN Model on Test Set
+y_pred_dnn = np.argmax(dnn_model.predict(X_test_scaled), axis=1)
+
+# Compute Accuracy
+dnn_accuracy = accuracy_score(y_test, y_pred_dnn)
+
+# Generate Classification Report
+dnn_report = classification_report(y_test, y_pred_dnn, digits=2)
+
+# Generate Confusion Matrix
+dnn_conf_matrix = confusion_matrix(y_test, y_pred_dnn)
+
+# Print Results in the Same Format as Other Models
+print("\n===== Deep Neural Network (DNN) =====")
+print(f"Accuracy: {dnn_accuracy:.4f}")
+print("\nClassification Report:\n", dnn_report)
+print("\nConfusion Matrix:\n", dnn_conf_matrix, "\n")
+
+# Add DNN Results to Final Results Dictionary
+final_results["Deep Neural Network"] = {
+    "accuracy": dnn_accuracy,
+    "report": dnn_report,
+    "confusion_matrix": dnn_conf_matrix
+}
+
+
 # Identify the Best Performing Model
 best_model_name = max(final_results, key=lambda x: final_results[x]['accuracy'])
-best_model_params = best_models[best_model_name].get_params()
-
 print(f"\nBest Model: {best_model_name} with Accuracy: {final_results[best_model_name]['accuracy']:.4f}")
-print(f"Best Model Parameters: {best_model_params}")
+
+# Print all best parameters for each model
+print("\nBest Hyperparameters for Each Model:")
+for model_name, params in best_params.items():
+    print(f"{model_name}: {params}")
