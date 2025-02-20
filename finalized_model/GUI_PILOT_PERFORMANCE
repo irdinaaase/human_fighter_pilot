@@ -1,0 +1,147 @@
+import pandas as pd
+import numpy as np
+import tkinter as tk
+from tkinter import filedialog, ttk, messagebox
+from sklearn.preprocessing import RobustScaler
+from xgboost import XGBClassifier
+import joblib
+import seaborn as sns
+import matplotlib.pyplot as plt
+import os
+
+# Load trained XGBoost model and scaler
+xgb_model = joblib.load("xgb_best_model.pkl")  # Load trained model
+scaler = joblib.load("scaler.pkl")  # Load trained scaler
+
+# Define selected features
+selected_features = ['mission_complexity', 'cognitive_level', 'stress_level', 'time_reaction', 
+                     'reaction_stress_interaction', 'fatigue_mission_ratio', 'heart_rate_squared']
+
+# Global variable to store processed data
+processed_df = None  
+
+# Function to process live data
+def process_live_data(df_live):
+    df_live.fillna(df_live.median(), inplace=True)  # Handle missing values
+    
+    # Apply feature engineering
+    df_live['reaction_stress_interaction'] = df_live['time_reaction'] * df_live['environmental_stressors']
+    df_live['fatigue_mission_ratio'] = df_live['fatigue_level'] / (df_live['mission_complexity'] + 1)
+    df_live['heart_rate_squared'] = df_live['heart_rate'] ** 2
+    
+    df_live = df_live[selected_features]  # Select relevant features
+    df_scaled = scaler.transform(df_live)  # Scale data
+    predictions = xgb_model.predict(df_scaled)  # Predict performance
+    
+    # Convert predictions to categories
+    def map_performance(value):
+        if value in [0, 1]:
+            return 0  # Basic
+        elif value in [2, 3]:
+            return 1  # Skilled
+        elif value in [4, 5]:
+            return 2  # Expert
+        else:
+            return np.nan  # Handle unexpected values
+    
+    df_live['Predicted Performance'] = [map_performance(pred) for pred in predictions]
+    df_live['Performance Label'] = df_live['Predicted Performance'].map({0: 'Basic', 1: 'Skilled', 2: 'Expert'})
+
+    return df_live
+
+# Function to display results and enable download
+def display_results(df_live):
+    global processed_df
+    processed_df = df_live  # Store processed data globally
+
+    # Clear previous results
+    result_text.delete(1.0, tk.END)
+    
+    # Display results in text widget
+    result_text.insert(tk.END, df_live.to_string(index=False, justify='center'))
+
+    # Enable the "Download Predictions" button
+    download_button.config(state=tk.NORMAL)
+
+    # Ensure no missing values before plotting
+    df_live = df_live.dropna(subset=['Performance Label'])
+
+    # Convert 'Performance Label' to categorical type
+    df_live['Performance Label'] = df_live['Performance Label'].astype(str)
+
+    # Only plot if there is data
+    if not df_live.empty:
+        plt.figure(figsize=(8, 5))
+        sns.countplot(x=df_live['Performance Label'], palette="coolwarm")
+        plt.title("Predicted Pilot Performance Distribution", fontsize=14)
+        plt.xlabel("Performance Category", fontsize=12)
+        plt.ylabel("Count", fontsize=12)
+        plt.grid(True, linestyle='--', alpha=0.6)
+        plt.show()
+    else:
+        print("No valid data available for plotting.")
+
+
+# Function to download predictions
+def download_predictions():
+    global processed_df
+    if processed_df is not None:
+        file_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel Files", "*.xlsx")])
+        if file_path:
+            try:
+                if file_path:
+                    # Add a timestamp to avoid overwriting issues
+                    new_file_path = file_path.replace(".xlsx", f"_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+
+                    # Save the file
+                    processed_df.to_excel(new_file_path, index=False)
+                    
+                    # Show success message
+                    messagebox.showinfo("Download Complete", f"Predicted results saved successfully:\n{new_file_path}")
+
+            except PermissionError:
+                messagebox.showerror("Permission Error", "Unable to save the file.\nClose any open instances of the file and try again.")
+            except Exception as e:
+                messagebox.showerror("Error", f"An unexpected error occurred:\n{e}")
+    else:
+        messagebox.showwarning("No Data", "No predictions available to download. Please process a file first.")
+
+# Function to open and process file
+def open_file():
+    file_path = filedialog.askopenfilename(title="Select Live Data File", filetypes=[("Excel Files", "*.xlsx")])
+    if file_path:
+        df_live = pd.read_excel(file_path)
+        df_live = process_live_data(df_live)
+        display_results(df_live)
+
+# GUI Setup
+root = tk.Tk()
+root.title("Pilot Performance Live Analysis")
+root.geometry("1000x600")
+root.configure(bg="#f8f9fa")
+
+frame = tk.Frame(root, bg="#ffffff", padx=20, pady=20, relief=tk.RIDGE, borderwidth=2)
+frame.pack(pady=20, padx=20, fill=tk.BOTH, expand=True)
+
+label = tk.Label(frame, text="Upload Live Data for Pilot Performance Analysis", font=("Arial", 18, "bold"), bg="#ffffff")
+label.pack(pady=10)
+
+upload_button = tk.Button(frame, text="Upload Live Data", command=open_file, font=("Arial", 14, "bold"), bg="#007BFF", fg="white", padx=20, pady=10, relief=tk.RAISED)
+upload_button.pack(pady=10)
+
+result_frame = tk.Frame(frame, bg="#ffffff")
+result_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+
+result_text = tk.Text(result_frame, wrap=tk.NONE, height=15, width=100, font=("Courier", 11), bg="#f8f9fa", fg="#333", padx=10, pady=10, relief=tk.SUNKEN)
+result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+scrollbar = tk.Scrollbar(result_frame, command=result_text.yview)
+result_text.config(yscrollcommand=scrollbar.set)
+scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+# Download Button (Disabled by Default)
+download_button = tk.Button(frame, text="Download Predictions", command=download_predictions, font=("Arial", 14, "bold"), bg="#28A745", fg="white", padx=20, pady=10, relief=tk.RAISED, state=tk.DISABLED)
+download_button.pack(pady=10)
+
+# Run GUI
+root.mainloop()
